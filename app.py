@@ -42,7 +42,7 @@ with st.sidebar:
     is_valid_data, uploaded_leagues = False, []
     if uploaded_file is not None:
         try:
-            # PERMANENT AUTO-CORRECTION SHIELD: Automatically truncates phone comma leaks
+            # PERMANENT AUTO-CORRECTION INGESTION SHIELD: Reads lines and strips mobile spreadsheet comma overflows
             uploaded_file.seek(0)
             raw_lines = [line.decode("utf-8").strip() for line in uploaded_file.readlines() if line.strip()]
             
@@ -60,16 +60,17 @@ with st.sidebar:
             
             missing_cols = [col for col in REQUIRED_COLUMNS if col not in list(full_validation_df.columns)]
             if len(missing_cols) == 0:
-                st.success("✅ SCHEMA VALID (AUTO-SHIELD ACTIVE)")
+                st.success("¼ SCHEMA VALID (AUTO-SHIELD ACTIVE)")
                 is_valid_data = True
                 full_validation_df["league_country"] = full_validation_df["league_country"].astype(str).str.strip()
                 uploaded_leagues = sorted(list(full_validation_df["league_country"].dropna().unique()))
             else:
-                st.error("❌ HEADER KEYS INVALID"); [st.code(f"⚠️ {m}") for m in missing_cols]
+                st.error("Ê HEADER KEYS INVALID"); [st.code(f"ª {m}") for m in missing_cols]
         except Exception as e: 
             st.error(f"Ingestion Shield Error: {e}")
     if not is_valid_data or uploaded_file is None: 
         st.stop()
+    # Continues immediately from Segment 1 sidebar validation exit
     selected_league_filter = st.selectbox("Select Target League:", uploaded_leagues)
     half_life_days = st.slider("Time-Decay Half Life (Days)", 15, 90, 45, 1)
     
@@ -90,10 +91,42 @@ raw_master_df["match_timestamp"] = pd.to_datetime(raw_master_df["match_timestamp
 raw_master_df = raw_master_df.drop_duplicates(subset=["league_country", "match_timestamp", "home_team", "away_team"], keep="first").reset_index(drop=True)
 filtered_df = raw_master_df[raw_master_df["league_country"].str.lower().str.strip() == selected_league_filter.lower().strip()].reset_index(drop=True)
 
-tab_pred, tab_tables, tab_history = st.tabs(["📅 PROJECTIONS", "🌍 STANDINGS", "📜 BACKTESTER"])
+tab_pred, tab_tables, tab_history = st.tabs(["½ PROJECTIONS", "¹ STANDINGS", "Ý BACKTESTER"])
 
 with tab_tables: 
-    st.dataframe(engine.generate_dynamic_league_table(filtered_df), use_container_width=True)
+    st.markdown(f"### Dynamic Standings Matrix: {selected_league_filter.upper()}")
+    base_table = engine.generate_dynamic_league_table(filtered_df)
+    
+    if not base_table.empty:
+        # --- SHOTS-TO-GOALS EFFICIENCY INDEX ENGINE LOOP ---
+        st.markdown("#### ¯ Process Efficiency Indicators (SOT per Goal)")
+        completed_historical = filtered_df.dropna(subset=["home_goals", "away_goals"])
+        
+        if not completed_historical.empty:
+            h_sot = completed_historical.groupby("home_team")["home_sot"].sum()
+            a_sot = completed_historical.groupby("away_team")["away_sot"].sum()
+            h_gl = completed_historical.groupby("home_team")["home_goals"].sum()
+            a_gl = completed_historical.groupby("away_team")["away_goals"].sum()
+            
+            h_sot_con = completed_historical.groupby("home_team")["away_sot"].sum()
+            a_sot_con = completed_historical.groupby("away_team")["home_sot"].sum()
+            h_gl_con = completed_historical.groupby("home_team")["away_goals"].sum()
+            a_gl_con = completed_historical.groupby("away_team")["home_goals"].sum()
+            
+            total_sot_scored = h_sot.add(a_sot, fill_value=0)
+            total_goals_scored = h_gl.add(a_gl, fill_value=0)
+            total_sot_conceded = h_sot_con.add(a_sot_con, fill_value=0)
+            total_goals_conceded = h_gl_con.add(a_gl_con, fill_value=0)
+            
+            eff_df = pd.DataFrame(index=total_sot_scored.index)
+            eff_df["SOT_Per_Goal_Scored"] = (total_sot_scored / total_goals_scored.replace(0, 1)).round(2)
+            eff_df["SOT_Allowed_Per_Goal_Conceded"] = (total_sot_conceded / total_goals_conceded.replace(0, 1)).round(2)
+            eff_df = eff_df.reset_index().rename(columns={"home_team": "Club Team", "index": "Club Team"})
+            
+            final_display_table = pd.merge(base_table, eff_df, on="Club Team", how="left")
+            st.dataframe(final_display_table, use_container_width=True)
+        else: st.dataframe(base_table, use_container_width=True)
+    else: st.info("Upload historical results to view dynamic table indexes.")
 
 with tab_history:
     league_key = selected_league_filter.lower().strip()
@@ -103,13 +136,12 @@ with tab_history:
         b_df["is_correct"] = b_df["model_probability"] >= 0.40
         st.metric("Backtest Prediction Accuracy", f"{(b_df['is_correct'].sum()/len(b_df))*100:.1f}%")
         st.dataframe(b_df, use_container_width=True)
-
+# Continues immediately inside tab_pred layout frame logic
 with tab_pred:
     options = {f"[{r['league_country'].upper()}] {r['home_team']} vs {r['away_team']} ({pd.to_datetime(r['match_timestamp']).strftime('%Y-%m-%d')})": r for idx, r in filtered_df.iterrows()}
     sel_match = st.selectbox("Select Profile Target fixture:", list(options.keys()))
     if sel_match:
-        target = options[sel_match]
-        target_ts = pd.to_datetime(target["match_timestamp"])
+        target = options[sel_match]; target_ts = pd.to_datetime(target["match_timestamp"])
         sc1, sc2 = st.columns(2)
         with sc1:
             h_status = st.selectbox("Home Status:", ["stable", "promoted", "relegated"])
@@ -121,6 +153,7 @@ with tab_pred:
             a_rest = st.slider("Away Rest Days", 1, 14, 5)
             odds_2 = st.number_input("Book Away Odds:", value=3.40)
             odds_over = st.number_input("Book Over 2.5 Odds:", value=1.95)
+
         is_fr = st.session_state.freeze_matrix.get(league_key, False)
         res = engine.predict_match_probabilities(filtered_df, target["home_team"], target["away_team"], target_ts, baseline_goals, h_rest, a_rest, h_status, a_status, max_score_cap, vol_dampener, is_fr)
         h_s = engine.parse_live_team_averages(filtered_df, target["home_team"], target_ts, half_life_days, h_status, is_fr)
@@ -130,113 +163,74 @@ with tab_pred:
         prob_matrix = res["raw_matrix"]
         
         over_25_p, btts_yes_p = 0.0, 0.0
-        for r_idx in range(prob_matrix.shape[0]):
-            for a_idx in range(prob_matrix.shape[1]):
+        for r_idx in range(prob_matrix.shape):
+            for a_idx in range(prob_matrix.shape):
                 cell_p = prob_matrix[r_idx, a_idx]
                 if r_idx + a_idx > 2.5: over_25_p += cell_p
                 if r_idx > 0 and a_idx > 0: btts_yes_p += cell_p
 
-        under_25_p = 1.0 - over_25_p
-        btts_no_p = 1.0 - btts_yes_p
-        dc_1X_p = prob_home + prob_draw
-        dc_X2_p = prob_draw + prob_away
-        dc_12_p = prob_home + prob_away
+        under_25_p, btts_no_p = 1.0 - over_25_p, 1.0 - btts_yes_p
+        dc_1X_p, dc_X2_p, dc_12_p = prob_home + prob_draw, prob_draw + prob_away, prob_home + prob_away
 
-        ev_1 = (prob_home * odds_1) - 1.0
-        ev_X = (prob_draw * odds_X) - 1.0
-        ev_2 = (prob_away * odds_2) - 1.0
-        ev_over = (over_25_p * odds_over) - 1.0
+        ev_1, ev_X, ev_2, ev_over = (prob_home*odds_1)-1, (prob_draw*odds_X)-1, (prob_away*odds_2)-1, (over_25_p*odds_over)-1
+        conf_1, conf_X, conf_2, conf_over = prob_home - (1/odds_1), prob_draw - (1/odds_X), prob_away - (1/odds_2), over_25_p - (1/odds_over)
 
-        conf_1 = prob_home - (1.0 / odds_1)
-        conf_X = prob_draw - (1.0 / odds_X)
-        conf_2 = prob_away - (1.0 / odds_2)
-        conf_over = over_25_p - (1.0 / odds_over)
-
-        raw_pool = [
-            ("HOME WIN (1)", ev_1, prob_home, conf_1),
-            ("DRAW (X)", ev_X, prob_draw, conf_X),
-            ("AWAY WIN (2)", ev_2, prob_away, conf_2),
-            ("OVER 2.5 GOALS", ev_over, over_25_p, conf_over)
-        ]
-        
-        # Dual-Gate Filter Logic
-        qualified = [item for item in raw_pool if item[1] > 0.0 and item[2] >= 0.35]
+        raw_pool = [("HOME WIN (1)", ev_1, prob_home, conf_1), ("DRAW (X)", ev_X, prob_draw, conf_X), ("AWAY WIN (2)", ev_2, prob_away, conf_2), ("OVER 2.5 GOALS", ev_over, over_25_p, conf_over)]
+        qualified = [item for item in raw_pool if item > 0.0 and item >= 0.35]
         
         if qualified:
-            qualified.sort(key=lambda x: x[1], reverse=True)
-            best_pick, best_ev, best_prob, best_conf = qualified[0]
-            optimal_bet = best_pick
-        else: 
-            optimal_bet = "NO SELECTION MET STRATEGIC CRITERIA (EV OR PROBABILITY FLOOR FAILED)"
-            best_ev, best_conf, best_prob = 0.0, 0.0, 0.0
+            qualified.sort(key=lambda x: x, reverse=True)
+            best_pick, best_ev, best_prob, best_conf = qualified; optimal_bet = best_pick
+        else: optimal_bet, best_ev = "NO SELECTION MET STRATEGIC CRITERIA (EV OR PROBABILITY FLOOR FAILED)", 0.0
             
         sd = min(h_s["games_played"], a_s["games_played"])
         confidence = min(100, int((sd / 12.0) * 100)) if sd > 0 else 15
         
-        if confidence < 50: 
-            st.warning(f"⚠️ **CRITICAL RISK ALERT: LOW DATA CONFIDENCE ({confidence}%)** — Minimal rolling sample size available. Output regressed.")
+        if confidence < 50: st.warning(f"ª **CRITICAL RISK ALERT: LOW DATA CONFIDENCE ({confidence}%)**")
         
-        if optimal_bet == "NO SELECTION MET STRATEGIC CRITERIA (EV OR PROBABILITY FLOOR FAILED)":
-            bet_rec = "❌ NO BET"
-            bet_rating, stake = "PASS - HOLD CAPITAL (VOLUME AND VALUE FLOORS FAILED)", 0.0
-        elif confidence < 50:
-            bet_rec = "❌ NO BET"
-            bet_rating, stake = "PASS - UNVERIFIED TRIAL PROFILE (CONFIDENCE BELOW 50% RISK CEILING)", 0.0
+        if optimal_bet == "NO SELECTION MET STRATEGIC CRITERIA (EV OR PROBABILITY FLOOR FAILED)" or confidence < 50:
+            bet_rec, stake = "ø NO BET", 0.0
+            bet_rating = "PASS - HOLD CAPITAL (VOLUME, VALUE, OR RISK FLOORS FAILED)"
         else:
-            if best_ev >= 0.071:
-                bet_rec = "🔥 HIGH BET"
-                bet_rating, stake = "HIGH CONVICTION SYSTEM MISPRICING ADVANTAGE", 3.5
-            else:
-                bet_rec = "📈 LOW BET"
-                bet_rating, stake = "MICRO GRINDER STANDARD PORTFOLIO SELECTION", 1.0
+            if best_ev >= 0.071: bet_rec, stake, bet_rating = "🔥 HIGH BET", 3.5, "HIGH CONVICTION SYSTEM MISPRICING ADVANTAGE"
+            else: bet_rec, stake, bet_rating = "📈 LOW BET", 1.0, "MICRO GRINDER STANDARD PORTFOLIO SELECTION"
             
         c_l, c_r = st.columns(2)
         with c_l:
-            st.markdown('<p class="market-header">📊 Dashboard Live Value Analyst & Confidence Monitor</p>', unsafe_allow_html=True)
+            st.markdown('<p class="market-header">¯ Dashboard Live Value Analyst & Confidence Monitor</p>', unsafe_allow_html=True)
             m_acc1, m_acc2, m_conf = st.columns(3)
             with m_acc1: st.metric("Overall App Accuracy", "64.2%")
             with m_acc2: st.metric(f"{selected_league_filter} Hit Rate", "61.8%")
             with m_conf: st.metric("Match Confidence", f"{confidence}%")
             
-            st.markdown("### 🏷️ System Target Evaluation")
-            if qualified and confidence >= 50: 
-                if "HIGH" in bet_rec: st.error(f"🚨 CRITICAL VALUE EDGE: {bet_rec} on {optimal_bet} (+{best_ev*100:.1f}% EV)")
-                else: st.warning(f"📈 STANDARD STABLE EDGE: {bet_rec} on {optimal_bet} (+{best_ev*100:.1f}% EV)")
-            else: 
-                st.info(f"❌ SYSTEM ACTION DISMISSAL: {bet_rec}")
+            st.markdown("### ¯ System Target Evaluation")
+            if qualified and confidence >= 50:
+                if "HIGH" in bet_rec: st.error(f"ª CRITICAL VALUE EDGE: {bet_rec} on {optimal_bet} (+{best_ev*100:.1f}% EV)")
+                else: st.warning(f"¯ STANDARD STABLE EDGE: {bet_rec} on {optimal_bet} (+{best_ev*100:.1f}% EV)")
+            else: st.info(f"ø SYSTEM ACTION DISMISSAL: {bet_rec}")
             st.markdown("---")
             
-            st.write(f"🏠 **Home Win EV**: `{ev_1*100:+.1f}%` (Prob: `{prob_home*100:.1f}%`)")
-            st.write(f"🤝 **Draw Outcome EV**: `{ev_X*100:+.1f}%` (Prob: `{prob_draw*100:.1f}%`)")
-            st.write(f"🚀 **Away Win EV**: `{ev_2*100:+.1f}%` (Prob: `{prob_away*100:.1f}%`)")
-            st.write(f"⚽ **Over 2.5 Goals EV**: `{ev_over*100:+.1f}%` (Prob: `{over_25_p*100:.1f}%`)")
+            st.write(f"🏠 **Home Win EV**: `{ev_1*100:+.1f}%` (Prob: `{prob_home*100:.1f}%`) | 🤝 **Draw EV**: `{ev_X*100:+.1f}%` (Prob: `{prob_draw*100:.1f}%`)")
+            st.write(f"🚀 **Away Win EV**: `{ev_2*100:+.1f}%` (Prob: `{prob_away*100:.1f}%`) | ⚽ **Over EV**: `{ev_over*100:+.1f}%` (Prob: `{over_25_p*100:.1f}%`)")
             st.markdown("---")
             st.write(f"🛡️ **Double Chance 1X**: `{dc_1X_p*100:.1f}%` | **X2**: `{dc_X2_p*100:.1f}%` | **12**: `{dc_12_p*100:.1f}%`")
             st.write(f"⚽ **BTTS (Yes)**: `{btts_yes_p*100:.1f}%` | **BTTS (No)**: `{btts_no_p*100:.1f}%`")
             
-            # --- PROCESS-BASED TEXT INSIGHT GENERATION MATRIX ---
             st.markdown("### 🧠 Model Tactical Rationale Breakdown")
             insight_lines = []
-            
             if h_s["att_strength_goals"] > a_s["att_strength_goals"] * 1.25:
-                insight_lines.append(f"• **Dominant Threat Area**: {target['home_team']}'s attacking index ({h_s['att_strength_goals']:.2f}) heavily outclasses the visitors due to superior Final Third entries and an average Box Threat metric of {h_s['box_threat']:.1f}.")
+                insight_lines.append(f"• **Dominant Threat Area**: {target['home_team']}'s attacking index ({h_s['att_strength_goals']:.2f}) outclasses the visitors due to superior Final Third entries and an average Box Threat metric of {h_s['box_threat']:.1f}.")
             elif a_s["att_strength_goals"] > h_s["att_strength_goals"] * 1.25:
                 insight_lines.append(f"• **Dominant Threat Area**: {target['away_team']}'s offensive efficiency ({a_s['att_strength_goals']:.2f}) proves superior. Their final-third progression metrics outscale the hosts' backline layout.")
-            else:
-                insight_lines.append("• **Balanced Attacking Structure**: Both teams display closely matched offensive process metrics, indicating high probability for long periods of midfield possession struggle.")
-
+            else: insight_lines.append("• **Balanced Attacking Structure**: Both teams display closely matched offensive process metrics, indicating high probability for long periods of midfield possession struggle.")
             if h_s["def_resistance"] > a_s["def_resistance"] * 1.15:
                 insight_lines.append(f"• **Defensive Structural Edge**: {target['home_team']} holds a strong positional advantage. Their Ground/Aerial duel win coefficient ({h_s['def_resistance']:.2f}) limits counter-threat risk.")
             elif a_s["def_resistance"] > h_s["def_resistance"] * 1.15:
                 insight_lines.append(f"• **Defensive Structural Edge**: {target['away_team']} possesses high 1v1 ground duel containment efficiency ({a_s['def_resistance']:.2f}), reducing the hosts' conversion capability.")
-            else:
-                insight_lines.append("• **Vulnerable Transition Lanes**: Both defensive blocks display similar ground duel success rates, meaning high-turnover intervals are highly likely to create shooting options.")
-
+            else: insight_lines.append("• **Vulnerable Transition Lanes**: Both defensive blocks display similar ground duel success rates, meaning high-turnover intervals are highly likely to create shooting options.")
             if optimal_bet != "NO SELECTION MET STRATEGIC CRITERIA (EV OR PROBABILITY FLOOR FAILED)" and confidence >= 50:
                 insight_lines.append(f"• **Value Trigger Summary**: The model selected **{optimal_bet}** because the bookmaker's price fails to account for these process advantages, offering a calculated edge of `+{best_ev*100:.1f}% EV` over house lines.")
-            else:
-                insight_lines.append(f"• **Value Trigger Summary**: System assigned a safe **{bet_rec}** command. The line prices are completely efficient, or the match data confidence layer is too weak to offset standard variation risks.")
-                
+            else: insight_lines.append(f"• **Value Trigger Summary**: System assigned a safe **{bet_rec}** command. The line prices are completely efficient, or the match data confidence layer is too weak to offset standard variation risks.")
             st.markdown(f'<div class="insight-box">{"<br><br>".join(insight_lines)}</div>', unsafe_allow_html=True)
             
         with c_r:
@@ -260,5 +254,5 @@ with tab_pred:
             
         st.markdown("### 🧮 Dixon-Coles Probability Matrix Distribution Grid")
         grid_matrix = res.get("raw_matrix", np.zeros((max_score_cap + 1, max_score_cap + 1)))
-        grid_df = pd.DataFrame(grid_matrix, index=[f"Home {i}" for i in range(grid_matrix.shape[0])], columns=[f"Away {j}" for j in range(grid_matrix.shape[1])])
+        grid_df = pd.DataFrame(grid_matrix, index=[f"Home {i}" for i in range(grid_matrix.shape)], columns=[f"Away {j}" for j in range(grid_matrix.shape)])
         st.dataframe(grid_df.style.format("{:.4f}").background_gradient(cmap="Blues"), use_container_width=True)
